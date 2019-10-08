@@ -1,0 +1,160 @@
+Dim driver As WebDriver
+'A列に店名入力→営業時間>B列 アクセス>C列にnavitime.co.jpより内容取得して入力
+'A列のセルにカーソル合わせてスタート&timeoutとかエラーでたらダイアログ閉じて停止→リスタート
+'該当なしは手打ち
+
+Sub searchAndInput()
+    Dim val As String, row As Long, col As Long, flag As Boolean, url1 As String, url2 As String
+    
+    flag = True
+    'While (flag)
+        val = ActiveCell.value
+        row = ActiveCell.row
+        col = ActiveCell.Column
+        url1 = "https://www.navitime.co.jp"
+        url2 = "/"
+        
+        If (val = "" Or col <> 1 Or flag = False) Then
+            flag = False
+            driver.stop
+            Exit Sub
+        Else
+            flag = searchMain(val, row, col, url1, url2)
+            ActiveCell.Offset(1, 0).Activate
+            '以下のgetは一回だけならいらないけどループ時は必要
+            driver.get (url2)
+            'waitなくてもいいかも
+            'driver.Wait (1000)
+        End If
+    'Wend
+    driver.stop
+End Sub
+
+'検索メイン処理,処理が終わったら現在の行をかえす
+Function searchMain(col_a_val As String, row As Long, col As Long, url1 As String, url2 As String) As Boolean
+    'url設定
+    Dim urlmain As String, urlsub As String
+    urlmain = url1
+    urlsub = url2
+    
+    Dim names As Variant, name As String, branch As String, current_row As Long, current_col As Long
+    name = col_a_val
+    names = Split(name, " ")
+    branch = names(UBound(names))
+    current_row = row
+    current_col = col
+    
+    'ウィンドウが開いてない場合,オブジェクト取得
+    If (driver Is Nothing) Then
+        Set driver = New SeleniumWrapper.WebDriver
+        'addargumentはstartの前に書くこと,headlessのときは下の奴を非コメント(上手く行かないかも...)
+        driver.addArgument "headless"
+        driver.addArgument "disable-gpu"
+        'driver.addArgument ("window-size=500,600")
+        driver.start "chrome", "https://www.navitime.co.jp"
+        driver.get ("/")
+    End If
+    
+    Call driver.Wait(1000)
+
+retry:
+    '検索&submit
+    Dim searchword As Object, submitbtn As Object
+    Set searchword = driver.findElementByCssSelector("#search-text-box")
+    Call searchword.Clear
+    Call searchword.SendKeys(name)
+    searchword.submit
+    
+    '検索結果がない場合noresult
+    If (driver.findElementsByCssSelector(".not_found_message").Count > 0) Then
+        Cells(current_row, current_col + 1).value = "該当なし"
+        GoTo noresult
+    End If
+    
+    Dim check_txt As String
+    '直接対象ページが開く場合と候補リンクページが出る場合の分岐,校舎の場合マッチしたらページ遷移
+    If (driver.findElementsByCssSelector("#left_pane > div.spot_info_pane > div.name > ruby > h1").Count > 0) Then
+        check_txt = driver.findElementByCssSelector("#left_pane > div.spot_info_pane > div.name > ruby > h1").text
+        
+        If (check_txt <> name) Then
+            Cells(current_row, current_col + 1).value = "該当なし"
+            GoTo noresult
+        End If
+        
+    ElseIf (driver.findElementsByCssSelector("#spot_area").Count > 0) Then
+    
+        '検索結果の最初のタイトルに検索ワードが含まれてればページ遷移,なければnoresult
+        Dim reslink As WebElement, pagelink As Boolean
+        pagelink = False
+        Set reslink = driver.findElementByCssSelector("#spot_area > ul.candidates > li > ul > li.spot_detail > dl > dt > a")
+        check_txt = reslink.text
+        
+        If (InStr(check_txt, name) > 0) Then
+                    pagelink = True
+                    Call reslink.click
+        End If
+        
+        If (pagelink = False) Then
+            Cells(current_row, current_col + 1).value = "リンクなし"
+            GoTo noresult
+        End If
+    End If
+    
+'===ここから該当ページから値を引っ張ってセルに入力するコード====
+    
+    '===== 各値取得 =====
+    Call driver.Wait(1000)
+    
+    Dim timetag As WebElement, eigyo_jikan As String, moyori_eki As String, moyori_bus As String
+    If (driver.findElementsByCssSelector("#left_pane > div.detail_info_pane > div.detail_contents > ul > li:nth-child(4) > dl > dd").Count <= 0) Then
+        Cells(current_row, current_col + 1).value = "no timetag"
+        GoTo noresult
+    End If
+    
+    Set timetag = driver.findElementByCssSelector("#left_pane > div.detail_info_pane > div.detail_contents > ul > li:nth-child(4) > dl > dd")
+    eigyo_jikan = RepTxt(timetag.text)
+    
+    'AccessDataでリスト取得&リストの最後の要素は"もっとみる"リンクなので予め外す
+    moyori_eki = "最寄り駅" & vbCrLf & AccessData(driver.findElementsByCssSelector(".station ul li:not(:last-child)"))
+    moyori_bus = "最寄りバス停" & vbCrLf & AccessData(driver.findElementsByCssSelector(".busstop ul li:not(:last-child)"))
+   
+    '===== セル入力 =====
+    Cells(current_row, current_col + 1).value = eigyo_jikan & vbCrLf & moyori_eki
+    Cells(current_row, current_col + 2).value = vbCrLf & moyori_bus
+    
+'検索候補が出ない場合とかココにジャンプ
+noresult:
+    searchMain = True
+    
+End Function
+
+'営業時間()内のreplace
+Function RepTxt(txt As String) As String
+    Dim reg, t As String, time As String
+    Set reg = CreateObject("VBScript.RegExp")
+    t = txt
+    
+    With reg
+        .Pattern = "[(].*[)]"     '()で囲まれてるとこ正規表現パターン設定
+        .IgnoreCase = True '大文字と小文字を区別するFalse しないTrue
+        .Global = True       '文字列全体を検索するTrue しないFalse
+    End With
+    
+    time = reg.Replace(t, "")
+    RepTxt = time
+End Function
+
+'引数のリスト取得と文字整形して返す
+Function AccessData(access_li As WebElementCollection) As String
+    Dim lists As WebElementCollection
+    Set lists = access_li
+
+    Dim l As Integer, dataset As String
+    dataset = ""
+    For l = 0 To lists.Count - 1
+        dataset = dataset & "　　　　" & lists(l).findElementByCssSelector(".icon_number").text & vbCrLf _
+                & lists(l).findElementByCssSelector("h3").text & vbCrLf _
+                & lists(l).findElementByCssSelector(".weak").text & vbCrLf
+    Next
+    AccessData = dataset
+End Function
